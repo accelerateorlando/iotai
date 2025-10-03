@@ -1,0 +1,25 @@
+version: "3.8"
+services:
+  moodcam:
+    build: ./emotion-mqtt
+    container_name: moodcam
+    restart: unless-stopped
+    environment:
+      CAMERA_NAME: living_room
+      CAMERA_SRC: usb:/dev/video0
+      MQTT_HOST: host.docker.internal
+      MQTT_PORT: "8123"
+      MQTT_USER: admin
+      MQTT_PASS: test123
+      SAVE_DEBUG_IMAGE: true
+      MQTT_TOPIC: moodcam/living_room/emotion
+      FRAME_INTERVAL_MS: "500"        # analyze every 0.5s
+      MIN_FACE_SIZE: "80"              # pixels; ignore tiny faces
+      SMOOTHING_SEC: "2.0"             # temporal smoothing
+      MIN_CONFIDENCE: "0.60"           # only publish if max prob ≥ this
+    volumes:
+      - ./emotion-mqtt/models:/models
+    devices:
+      - "/dev/video0:/dev/video0"
+    group_add:
+      - "video"

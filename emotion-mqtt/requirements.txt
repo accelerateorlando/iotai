@@ -1,0 +1,7 @@
+opencv-python-headless==4.10.0.84
+onnxruntime==1.18.1
+numpy==1.26.4
+paho-mqtt==1.6.1
+deepface==0.0.79
+tensorflow==2.15.0
+keras==2.15.0
