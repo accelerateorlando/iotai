@@ -26,22 +26,147 @@ client.loop_start()
 
 # --- Camera open ---
 def open_cam(src: str):
+    print(f'open_cam called with src: {src}')
+    
+    # Check if it's a USB camera
     if src.startswith("usb:"):
         path = src.split("usb:")[1] or "/dev/video0"
+        print(f'USB camera path: {path}')
+        
+        # Check if device file exists
+        import os
+        if os.path.exists(path):
+            print(f'Device file {path} exists')
+            # Check permissions
+            if os.access(path, os.R_OK):
+                print(f'Device file {path} is readable')
+            else:
+                print(f'WARNING: Device file {path} is not readable')
+        else:
+            print(f'ERROR: Device file {path} does not exist')
+            # List available video devices
+            print('Available video devices:')
+            for i in range(10):  # Check /dev/video0 through /dev/video9
+                dev_path = f'/dev/video{i}'
+                if os.path.exists(dev_path):
+                    print(f'  {dev_path} - exists')
+                else:
+                    print(f'  {dev_path} - not found')
+        
+        # Try to create VideoCapture
+        print(f'Attempting to create VideoCapture for {path}')
         cap = cv2.VideoCapture(path)
-        # Optional: tune capture size if your cam needs it
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        if cap is None:
+            print(f'ERROR: VideoCapture creation returned None for {path}')
+            return None
+            
+        print(f'VideoCapture created, isOpened: {cap.isOpened()}')
+        
+        if not cap.isOpened():
+            print(f'ERROR: VideoCapture failed to open {path}')
+            print('Possible causes:')
+            print('  - Device is in use by another process')
+            print('  - Insufficient permissions')
+            print('  - Device is not a valid video capture device')
+            print('  - Driver issues')
+            return cap
+        
+        # Try to get camera properties
+        try:
+            width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            print(f'Default camera properties - Width: {width}, Height: {height}, FPS: {fps}')
+        except Exception as e:
+            print(f'Could not get camera properties: {e}')
+        
+        # Try different resolutions to find what works best
+        resolutions_to_try = [
+            (1920, 1080),  # Full HD
+            (1280, 720),   # HD
+            (640, 480),    # VGA
+            (320, 240),    # QVGA
+        ]
+        
+        best_resolution = None
+        for test_width, test_height in resolutions_to_try:
+            print(f'Trying resolution: {test_width}x{test_height}')
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, test_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, test_height)
+            
+            # Check if the setting was accepted
+            actual_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            actual_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            
+            print(f'  Requested: {test_width}x{test_height}, Actual: {actual_width}x{actual_height}')
+            
+            if actual_width > 0 and actual_height > 0:
+                best_resolution = (int(actual_width), int(actual_height))
+                print(f'  ✓ Resolution accepted: {actual_width}x{actual_height}')
+                break
+            else:
+                print(f'  ✗ Resolution rejected')
+        
+        if best_resolution:
+            print(f'Using resolution: {best_resolution[0]}x{best_resolution[1]}')
+        else:
+            print('Warning: No suitable resolution found, using defaults')
+        
+        # Set other properties
+        print('Setting other camera properties...')
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FPS, 30)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # Final verification
+        final_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        final_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        final_fps = cap.get(cv2.CAP_PROP_FPS)
+        print(f'Final camera properties - Width: {final_width}, Height: {final_height}, FPS: {final_fps}')
+        
         return cap
     else:
         # assume RTSP/HTTP URL; let FFMPEG handle it
-        return cv2.VideoCapture(src)
+        print(f'Non-USB source, using directly: {src}')
+        cap = cv2.VideoCapture(src)
+        print(f'VideoCapture created for {src}, isOpened: {cap.isOpened()}')
+        return cap
+
+print(f'CAMERA_SRC environment variable: {CAMERA_SRC}')
+print(f'CAMERA_SRC type: {type(CAMERA_SRC)}')
+
+# Additional system debugging
+import subprocess
+try:
+    print('=== System Information ===')
+    print('Current user:', subprocess.check_output(['whoami'], text=True).strip())
+    print('Groups:', subprocess.check_output(['groups'], text=True).strip())
+    print('Video group members:', subprocess.check_output(['getent', 'group', 'video'], text=True).strip())
+    print('=== Video Devices ===')
+    result = subprocess.run(['ls', '-la', '/dev/video*'], capture_output=True, text=True)
+    if result.returncode == 0:
+        print(result.stdout)
+    else:
+        print('No video devices found')
+    print('=== USB Devices ===')
+    result = subprocess.run(['lsusb'], capture_output=True, text=True)
+    if result.returncode == 0:
+        print(result.stdout)
+    else:
+        print('Could not list USB devices')
+except Exception as e:
+    print(f'Could not get system info: {e}')
 
 cap = open_cam(CAMERA_SRC)
 if not cap or not cap.isOpened():
+    print('=== Camera Open Failed ===')
+    print('Troubleshooting steps:')
+    print('1. Check if camera is connected and recognized by the system')
+    print('2. Verify the device path in docker-compose.yml matches actual device')
+    print('3. Ensure the container has access to the video device')
+    print('4. Check if another process is using the camera')
+    print('5. Try running: docker exec -it moodcam ls -la /dev/video*')
     raise RuntimeError(f"Cannot open camera source: {CAMERA_SRC}")
 print('opened camera... deepface 3')
 
@@ -101,6 +226,16 @@ while True:
     print(f'read camera {ok} - took {t1-t0:.3f}s')
     if not ok:
         time.sleep(0.5); continue
+    
+    # Debug frame information
+    if frame is not None:
+        frame_height, frame_width = frame.shape[:2]
+        print(f'Captured frame dimensions: {frame_width}x{frame_height}')
+        print(f'Frame shape: {frame.shape}')
+        print(f'Frame data type: {frame.dtype}')
+        print(f'Frame min/max values: {frame.min()}/{frame.max()}')
+    else:
+        print('ERROR: Frame is None!')
     
     # Write the captured image to a local tmp file for debugging if enabled
     SAVE_DEBUG_IMAGE = bool(os.environ.get("SAVE_DEBUG_IMAGE", "0") not in ("0", "false", "False", ""))
