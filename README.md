@@ -13,3 +13,13 @@ docker compose build
 docker compose up -d
 
 Your camera should light up and you should see MQTT messages in the log.  You may need to update docker-compose.yml if you see error messages with MQTT / etc.
+
+
+emotion-mqtt/models
+
+remove Frame shape, Frame data, Frame min/max, read camera, deepface scorees
+
+
+read camera
+total loop time
+Action: 
