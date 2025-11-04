@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kivy-based Photobooth UI that captures an image, transcribes speech, and asks Gemini for a stylized result."""
+"""Kivy-based Photobooth UI that captures an image, transcribes speech, and uses FAL AI nano-banana model for image editing."""
 
 import argparse
 import base64
@@ -15,9 +15,11 @@ from io import BytesIO
 import cv2
 import numpy as np
 import speech_recognition as sr
-from google import genai
+import fal_client
 from PIL import Image
 import requests
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -316,6 +318,89 @@ class TextInputScreen(Screen):
         self.photobooth_app.screen_manager.current = 'input_method'
 
 
+class EmailInputScreen(Screen):
+    """Screen for email input."""
+    
+    def __init__(self, photobooth_app, **kwargs):
+        super().__init__(**kwargs)
+        self.photobooth_app = photobooth_app
+        
+        layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
+        
+        # Title
+        title = Label(
+            text='Enter your email address',
+            size_hint_y=0.15,
+            font_size=dp(24),
+            bold=True,
+            color=(0.2, 0.2, 0.2, 1)
+        )
+        layout.add_widget(title)
+        
+        # Instructions
+        instructions = Label(
+            text='We\'ll send your photo to this email address',
+            size_hint_y=0.1,
+            font_size=dp(16),
+            color=(0.4, 0.4, 0.4, 1)
+        )
+        layout.add_widget(instructions)
+        
+        # Email input
+        self.email_input = TextInput(
+            text='',
+            size_hint_y=0.2,
+            multiline=False,
+            font_size=dp(20),
+            hint_text='your.email@example.com',
+            input_type='text'
+        )
+        layout.add_widget(self.email_input)
+        
+        # Button container
+        button_layout = BoxLayout(orientation='horizontal', size_hint_y=0.15, spacing=dp(20))
+        
+        # Send button
+        send_btn = Button(
+            text='📧 SEND EMAIL',
+            font_size=dp(20),
+            bold=True,
+            background_color=(0.2, 0.7, 0.2, 1)
+        )
+        send_btn.bind(on_press=self.on_send)
+        button_layout.add_widget(send_btn)
+        
+        # Back button
+        back_btn = Button(
+            text='BACK',
+            font_size=dp(20),
+            background_color=(0.6, 0.6, 0.6, 1)
+        )
+        back_btn.bind(on_press=self.on_back)
+        button_layout.add_widget(back_btn)
+        
+        layout.add_widget(button_layout)
+        
+        self.add_widget(layout)
+    
+    def on_send(self, instance):
+        """Send email with photo."""
+        email = self.email_input.text.strip()
+        if email:
+            # Basic email validation
+            if '@' in email and '.' in email.split('@')[1]:
+                self.photobooth_app.send_email(email)
+            else:
+                self.photobooth_app.show_error("Please enter a valid email address")
+        else:
+            self.photobooth_app.show_error("Please enter an email address")
+    
+    def on_back(self, instance):
+        """Go back to result screen."""
+        self.email_input.text = ''
+        self.photobooth_app.screen_manager.current = 'result'
+
+
 class ResultScreen(Screen):
     """Screen for displaying generated results."""
     
@@ -363,15 +448,26 @@ class ResultScreen(Screen):
         new_btn.bind(on_press=self.on_new_photo)
         button_layout.add_widget(new_btn)
         
-        # Print button
-        print_btn = Button(
-            text='🖨️ PRINT',
+        # Print button (only show if not hidden)
+        if not self.photobooth_app.hide_print:
+            print_btn = Button(
+                text='🖨️ PRINT',
+                font_size=dp(18),
+                bold=True,
+                background_color=(0.2, 0.5, 0.8, 1)
+            )
+            print_btn.bind(on_press=self.on_print)
+            button_layout.add_widget(print_btn)
+        
+        # Email button
+        email_btn = Button(
+            text='📧 EMAIL',
             font_size=dp(18),
             bold=True,
-            background_color=(0.2, 0.5, 0.8, 1)
+            background_color=(0.8, 0.5, 0.2, 1)
         )
-        print_btn.bind(on_press=self.on_print)
-        button_layout.add_widget(print_btn)
+        email_btn.bind(on_press=self.on_email)
+        button_layout.add_widget(email_btn)
         
         # Quit button
         quit_btn = Button(
@@ -430,6 +526,10 @@ class ResultScreen(Screen):
     def on_print(self, instance):
         """Print the current image."""
         self.photobooth_app.print_current_image()
+    
+    def on_email(self, instance):
+        """Send email with the current image."""
+        self.photobooth_app.show_email_input()
     
     def on_quit(self, instance):
         """Quit the application."""
@@ -752,21 +852,28 @@ class LoadingScreen(Screen):
 class PhotoboothKivyApp(App):
     """Main Kivy application."""
     
-    def __init__(self, camera_index, api_key, model_name, speech_timeout, phrase_time_limit):
+    def __init__(self, camera_index, api_key, speech_timeout, phrase_time_limit, hide_print=False):
         super().__init__()
         self.camera_index = camera_index
         self.api_key = api_key
-        self.model_name = model_name
         self.speech_timeout = speech_timeout
         self.phrase_time_limit = phrase_time_limit
+        self.hide_print = hide_print
         
         # Initialize camera
         self.capture = cv2.VideoCapture(camera_index)
         if not self.capture.isOpened():
             raise RuntimeError(f"Unable to open camera index {camera_index}")
         
-        # Initialize Gemini client
-        self.client = genai.Client(api_key=api_key)
+        # FAL AI uses environment variable for API key, but we can set it if provided
+        if api_key:
+            os.environ["FAL_KEY"] = api_key
+        
+        # Initialize SendGrid client
+        sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
+        if not sendgrid_api_key:
+            sendgrid_api_key = _load_sendgrid_api_key_from_env_files()
+        self.sendgrid_client = SendGridAPIClient(api_key=sendgrid_api_key) if sendgrid_api_key else None
         
         # Current captured frame
         self.current_frame = None
@@ -782,6 +889,7 @@ class PhotoboothKivyApp(App):
         self.text_input_screen = TextInputScreen(self, name='text_input')
         self.loading_screen = LoadingScreen(self, name='loading')
         self.result_screen = ResultScreen(self, name='result')
+        self.email_input_screen = EmailInputScreen(self, name='email_input')
         
         # Add screens to manager
         self.screen_manager.add_widget(self.start_screen)
@@ -790,6 +898,7 @@ class PhotoboothKivyApp(App):
         self.screen_manager.add_widget(self.text_input_screen)
         self.screen_manager.add_widget(self.loading_screen)
         self.screen_manager.add_widget(self.result_screen)
+        self.screen_manager.add_widget(self.email_input_screen)
         
         # Set initial screen
         self.screen_manager.current = 'start'
@@ -861,15 +970,15 @@ class PhotoboothKivyApp(App):
         
         def generate_thread():
             try:
-                generated = self.call_gemini(self.current_frame, transcript)
+                generated = self.call_fal_ai(self.current_frame, transcript)
                 Clock.schedule_once(lambda dt: self.show_result(generated), 0)
             except Exception as exc:
                 Clock.schedule_once(lambda dt: self.show_error(f"Generation failed: {exc}"), 0)
         
         threading.Thread(target=generate_thread, daemon=True).start()
     
-    def call_gemini(self, frame, transcript):
-        """Call Gemini API to generate image."""
+    def call_fal_ai(self, frame, transcript):
+        """Call FAL AI nano-banana model to generate image."""
         # Convert OpenCV frame to PIL Image
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(frame_rgb)
@@ -883,25 +992,38 @@ class PhotoboothKivyApp(App):
         )
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[prompt, pil_image],
-            )
-
-            # Process the response to extract the generated image
-            for part in response.candidates[0].content.parts:
-                if part.inline_data is not None:
-                    # Convert the generated image back to OpenCV format
-                    generated_image = Image.open(BytesIO(part.inline_data.data))
-                    generated_array = np.array(generated_image)
-                    # Convert RGB to BGR for OpenCV
-                    result = cv2.cvtColor(generated_array, cv2.COLOR_RGB2BGR)
-                    return result
+            # Encode image as data URI
+            image_data_uri = fal_client.encode_image(pil_image, format="jpeg")
             
-            raise RuntimeError("No image data found in Gemini response")
+            # Call FAL AI nano-banana model
+            response = fal_client.run(
+                "fal-ai/nano-banana/edit",
+                arguments={
+                    "prompt": prompt,
+                    "image_urls": [image_data_uri],
+                    "num_images": 1,
+                    "output_format": "jpeg"
+                }
+            )
+            
+            # Process the response to extract the generated image
+            if "images" in response and len(response["images"]) > 0:
+                # Download the generated image from URL
+                image_url = response["images"][0]["url"]
+                img_response = requests.get(image_url)
+                img_response.raise_for_status()
+                
+                # Convert the generated image to OpenCV format
+                generated_image = Image.open(BytesIO(img_response.content))
+                generated_array = np.array(generated_image)
+                # Convert RGB to BGR for OpenCV
+                result = cv2.cvtColor(generated_array, cv2.COLOR_RGB2BGR)
+                return result
+            else:
+                raise RuntimeError("No image data found in FAL AI response")
             
         except Exception as e:
-            raise RuntimeError(f"Gemini API call failed: {e}")
+            raise RuntimeError(f"FAL AI API call failed: {e}")
     
     def save_generated_image(self, image):
         """Save the generated image with timestamp filename in photos directory."""
@@ -1032,6 +1154,104 @@ class PhotoboothKivyApp(App):
         
         threading.Thread(target=print_thread, daemon=True).start()
     
+    def show_email_input(self):
+        """Show email input screen."""
+        self.screen_manager.current = 'email_input'
+    
+    def send_email(self, recipient_email):
+        """Send email with the current saved image."""
+        if not self.current_saved_path:
+            self.show_error("No image to email")
+            return
+        
+        if not self.sendgrid_client:
+            self.show_error("SendGrid API key not configured. Please set SENDGRID_API_KEY environment variable.")
+            return
+        
+        def email_thread():
+            try:
+                # Load the image
+                with open(self.current_saved_path, 'rb') as f:
+                    image_data = f.read()
+                
+                # Read the image to get dimensions for the email
+                image = cv2.imread(self.current_saved_path)
+                if image is None:
+                    Clock.schedule_once(lambda dt: self.show_error("Could not load image for email"), 0)
+                    return
+                
+                # Encode image as base64 for attachment
+                encoded_image = base64.b64encode(image_data).decode()
+                
+                # Create email message
+                from_email = "help@maven.ly" #os.getenv("SENDGRID_FROM_EMAIL", "photobooth@makerfaire.com")
+                subject = "Your MakerFaire Photobooth Photo"
+                
+                # Get the image filename
+                image_filename = Path(self.current_saved_path).name
+                
+                # Create HTML email content
+                html_content = f"""
+                <html>
+                <body>
+                    <h2>Your Photobooth Photo</h2>
+                    <p>Thank you for visiting the Accelerate Orlando 2025 Photobooth!</p>
+                    <p>Your stylized photo is attached.</p>
+                    <p>Enjoy your memories!</p>
+                </body>
+                </html>
+                """
+                
+                # Create plain text content
+                plain_content = """
+                Your Photobooth Photo
+                
+                Thank you for visiting the Accelerate Orlando 2025 Photobooth!
+                Your stylized photo is attached.
+                
+                Enjoy your memories!
+                """
+                
+                # Create mail message
+                message = Mail(
+                    from_email=from_email,
+                    to_emails=recipient_email,
+                    subject=subject,
+                    html_content=html_content,
+                    plain_text_content=plain_content
+                )
+                
+                # Attach the image
+                attachment = Attachment()
+                attachment.file_content = FileContent(encoded_image)
+                attachment.file_name = FileName(image_filename)
+                attachment.file_type = FileType('image/jpeg')
+                attachment.disposition = Disposition('attachment')
+                message.attachment = attachment
+                
+                # Send email
+                response = self.sendgrid_client.send(message)
+                
+                # Check if email was sent successfully (status code 202 is success)
+                if response.status_code == 202:
+                    # Clear email input
+                    if hasattr(self.email_input_screen, 'email_input'):
+                        self.email_input_screen.email_input.text = ''
+                    # Navigate back to result screen and show success message
+                    def show_success(dt):
+                        self.screen_manager.current = 'result'
+                        self.show_status("Email sent successfully!")
+                    Clock.schedule_once(show_success, 0)
+                else:
+                    error_msg = f"Email failed with status code: {response.status_code}"
+                    Clock.schedule_once(lambda dt: self.show_error(error_msg), 0)
+                
+            except Exception as e:
+                error_msg = f"Email error: {str(e)}"
+                Clock.schedule_once(lambda dt: self.show_error(error_msg), 0)
+        
+        threading.Thread(target=email_thread, daemon=True).start()
+    
     def convert_to_pbm(self, gray_image):
         """Convert grayscale image to PBM format."""
         # Resize image to fit thermal printer dimensions (384x672 pixels)
@@ -1076,7 +1296,31 @@ def _load_api_key_from_env_files() -> Optional[str]:
                 if "=" not in stripped:
                     continue
                 key, value = stripped.split("=", 1)
-                if key.strip() == "GOOGLE_API_KEY":
+                if key.strip() == "FAL_KEY":
+                    return value.strip().strip('"\'')
+        except OSError:
+            continue
+    return None
+
+
+def _load_sendgrid_api_key_from_env_files() -> Optional[str]:
+    """Load SendGrid API key from .env files."""
+    search_paths = [
+        Path(__file__).resolve().parent / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
+    ]
+    for env_path in search_paths:
+        if not env_path.exists():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                if key.strip() == "SENDGRID_API_KEY":
                     return value.strip().strip('"\'')
         except OSError:
             continue
@@ -1085,13 +1329,8 @@ def _load_api_key_from_env_files() -> Optional[str]:
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Kivy-based Photobooth that collaborates with Gemini.")
+    parser = argparse.ArgumentParser(description="Kivy-based Photobooth that uses FAL AI nano-banana model.")
     parser.add_argument("--camera", type=int, default=0, help="Camera index to open (default: 0)")
-    parser.add_argument(
-        "--model",
-        default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-image-preview"),
-        help="Gemini multimodal model to use (default: gemini-2.5-flash-image-preview)",
-    )
     parser.add_argument(
         "--speech-timeout",
         type=float,
@@ -1104,18 +1343,23 @@ def parse_args() -> argparse.Namespace:
         default=8.0,
         help="Maximum speech duration to capture (default: 8.0)",
     )
+    parser.add_argument(
+        "--hide-print",
+        action="store_true",
+        help="Hide the print button on the result screen",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     """Main function."""
     args = parse_args()
-    api_key = os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("FAL_KEY")
     if not api_key:
         api_key = _load_api_key_from_env_files()
     if not api_key:
         print(
-            "Set GOOGLE_API_KEY as an environment variable or provide it in a .env file.",
+            "Set FAL_KEY as an environment variable or provide it in a .env file.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -1124,9 +1368,9 @@ def main() -> None:
         app = PhotoboothKivyApp(
             camera_index=args.camera,
             api_key=api_key,
-            model_name=args.model,
             speech_timeout=args.speech_timeout,
             phrase_time_limit=args.phrase_time_limit,
+            hide_print=args.hide_print,
         )
         app.run()
     except Exception as exc:
