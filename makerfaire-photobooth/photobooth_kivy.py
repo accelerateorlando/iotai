@@ -14,7 +14,10 @@ from io import BytesIO
 
 import cv2
 import numpy as np
-import speech_recognition as sr
+import queue
+import json
+import sounddevice as sd
+from vosk import Model, KaldiRecognizer
 import fal_client
 from PIL import Image
 import requests
@@ -852,13 +855,15 @@ class LoadingScreen(Screen):
 class PhotoboothKivyApp(App):
     """Main Kivy application."""
     
-    def __init__(self, camera_index, api_key, speech_timeout, phrase_time_limit, hide_print=False):
+    def __init__(self, camera_index, api_key, speech_timeout, phrase_time_limit, hide_print=False, 
+                 vosk_model_path=None, audio_device_index=None):
         super().__init__()
         self.camera_index = camera_index
         self.api_key = api_key
         self.speech_timeout = speech_timeout
         self.phrase_time_limit = phrase_time_limit
         self.hide_print = hide_print
+        self.audio_device_index = audio_device_index
         
         # Initialize camera
         self.capture = cv2.VideoCapture(camera_index)
@@ -874,6 +879,11 @@ class PhotoboothKivyApp(App):
         if not sendgrid_api_key:
             sendgrid_api_key = _load_sendgrid_api_key_from_env_files()
         self.sendgrid_client = SendGridAPIClient(api_key=sendgrid_api_key) if sendgrid_api_key else None
+        
+        # Initialize Vosk model (lazy load on first use)
+        self.vosk_model_path = vosk_model_path or os.getenv("VOSK_MODEL_PATH") or "/home/jimmy/models/vosk-model-small-en-us-0.15"
+        self.vosk_model = None
+        self.vosk_sample_rate = 16000
         
         # Current captured frame
         self.current_frame = None
@@ -922,33 +932,118 @@ class PhotoboothKivyApp(App):
         self.input_method_screen.show_captured_image(frame)
         self.screen_manager.current = 'input_method'
     
+    def _load_vosk_model(self):
+        """Load Vosk model if not already loaded."""
+        if self.vosk_model is None:
+            if not os.path.exists(self.vosk_model_path):
+                raise RuntimeError(f"Vosk model path does not exist: {self.vosk_model_path}")
+            self.vosk_model = Model(self.vosk_model_path)
+        return self.vosk_model
+    
     def capture_speech(self):
-        """Capture speech input in a separate thread."""
+        """Capture speech input in a separate thread using Vosk."""
         def speech_thread():
-            recognizer = sr.Recognizer()
             try:
-                with sr.Microphone(device_index=2, sample_rate=16000, chunk_size=1024) as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    Clock.schedule_once(lambda dt: self.show_status("Listening..."), 0)
-                    audio = recognizer.listen(
-                        source,
-                        timeout=self.speech_timeout,
-                        phrase_time_limit=self.phrase_time_limit,
-                    )
-            except sr.WaitTimeoutError:
-                Clock.schedule_once(lambda dt: self.show_error("No speech detected"), 0)
-                return
-            except OSError as exc:
-                Clock.schedule_once(lambda dt: self.show_error("Microphone not available"), 0)
-                return
-
-            try:
-                transcript = recognizer.recognize_google(audio)
-                Clock.schedule_once(lambda dt: self.process_input(transcript), 0)
-            except sr.UnknownValueError:
-                Clock.schedule_once(lambda dt: self.show_error("Could not understand speech"), 0)
-            except sr.RequestError as err:
-                Clock.schedule_once(lambda dt: self.show_error(f"Speech recognition error: {err}"), 0)
+                # Load Vosk model
+                model = self._load_vosk_model()
+                rec = KaldiRecognizer(model, self.vosk_sample_rate)
+                rec.SetWords(True)
+                
+                # Queue for audio data
+                q = queue.Queue()
+                
+                # Flag to stop listening
+                stop_listening = threading.Event()
+                
+                def audio_cb(indata, frames, timestamp, status):
+                    if status:
+                        print(status, flush=True)
+                    if not stop_listening.is_set():
+                        q.put(bytes(indata))
+                
+                # Update UI to show listening
+                Clock.schedule_once(lambda dt: self.show_status("Listening..."), 0)
+                
+                # Start audio stream
+                stream_kwargs = {
+                    'samplerate': self.vosk_sample_rate,
+                    'blocksize': 8000,
+                    'dtype': 'int16',
+                    'channels': 1,
+                    'callback': audio_cb
+                }
+                # Only set device if specified (None means use default)
+                if self.audio_device_index is not None:
+                    stream_kwargs['device'] = self.audio_device_index
+                
+                with sd.RawInputStream(**stream_kwargs):
+                    transcript = None
+                    start_time = time.time()
+                    last_result_time = None
+                    
+                    try:
+                        while True:
+                            # Check overall timeout - if we've been listening too long
+                            elapsed = time.time() - start_time
+                            max_time = self.speech_timeout + self.phrase_time_limit
+                            if elapsed > max_time:
+                                # Total timeout exceeded
+                                break
+                            
+                            try:
+                                # Get audio data - block until available (like example)
+                                data = q.get()
+                                
+                                if rec.AcceptWaveform(data):
+                                    # Final result available
+                                    res = json.loads(rec.Result())
+                                    text = res.get("text")
+                                    if text:
+                                        transcript = text
+                                        last_result_time = time.time()
+                                        print(f">> {transcript}", flush=True)
+                                        
+                                # Check partial results (like example, but commented out)
+                                # Uncomment if you want to see partial results:
+                                # partial = json.loads(rec.PartialResult())
+                                # if partial.get("partial"):
+                                #     print(f"Partial: {partial['partial']}", flush=True)
+                                    
+                            except queue.Empty:
+                                # Shouldn't happen with blocking get(), but handle it anyway
+                                continue
+                            
+                            # Check for silence timeout: if we had speech but no new results for a while, stop
+                            if transcript and last_result_time:
+                                silence_duration = time.time() - last_result_time
+                                if silence_duration > 2.0:  # 2 seconds of silence after speech
+                                    break
+                        
+                        # Get final result
+                        final_res = json.loads(rec.FinalResult())
+                        final_text = final_res.get("text")
+                        if final_text:
+                            # Use final result if it's more complete
+                            transcript = final_text
+                        
+                        # Process the transcript
+                        if transcript:
+                            Clock.schedule_once(lambda dt: self.process_input(transcript), 0)
+                        else:
+                            Clock.schedule_once(lambda dt: self.show_error("No speech detected"), 0)
+                            
+                    except KeyboardInterrupt:
+                        # Get final result
+                        final_res = json.loads(rec.FinalResult())
+                        if final_res.get("text"):
+                            Clock.schedule_once(lambda dt: self.process_input(final_res["text"]), 0)
+                    
+            except RuntimeError as e:
+                Clock.schedule_once(lambda dt: self.show_error(f"Vosk model error: {e}"), 0)
+            except OSError as e:
+                Clock.schedule_once(lambda dt: self.show_error(f"Microphone not available: {e}"), 0)
+            except Exception as e:
+                Clock.schedule_once(lambda dt: self.show_error(f"Speech recognition error: {e}"), 0)
         
         threading.Thread(target=speech_thread, daemon=True).start()
     
