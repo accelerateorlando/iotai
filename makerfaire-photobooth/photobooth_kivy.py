@@ -1343,11 +1343,6 @@ def parse_args() -> argparse.Namespace:
         default=8.0,
         help="Maximum speech duration to capture (default: 8.0)",
     )
-    parser.add_argument(
-        "--hide-print",
-        action="store_true",
-        help="Hide the print button on the result screen",
-    )
     return parser.parse_args()
 
 
@@ -1370,7 +1365,7 @@ def main() -> None:
             api_key=api_key,
             speech_timeout=args.speech_timeout,
             phrase_time_limit=args.phrase_time_limit,
-            hide_print=args.hide_print,
+            hide_print=True,
         )
         app.run()
     except Exception as exc:
