@@ -308,6 +308,11 @@ class TextInputScreen(Screen):
         
         self.add_widget(layout)
     
+    def on_enter(self):
+        """Called when the screen is entered - focus the text input."""
+        # Schedule focus after a short delay to ensure screen is fully rendered
+        Clock.schedule_once(lambda dt: setattr(self.text_input, 'focus', True), 0.1)
+    
     def on_submit(self, instance):
         """Submit text input."""
         text = self.text_input.text.strip()
@@ -386,6 +391,11 @@ class EmailInputScreen(Screen):
         
         self.add_widget(layout)
     
+    def on_enter(self):
+        """Called when the screen is entered - focus the email input."""
+        # Schedule focus after a short delay to ensure screen is fully rendered
+        Clock.schedule_once(lambda dt: setattr(self.email_input, 'focus', True), 0.1)
+    
     def on_send(self, instance):
         """Send email with photo."""
         email = self.email_input.text.strip()
@@ -443,7 +453,7 @@ class ResultScreen(Screen):
         
         # New photo button
         new_btn = Button(
-            text='📸 NEW PHOTO',
+            text='📸 START OVER',
             font_size=dp(18),
             bold=True,
             background_color=(0.2, 0.7, 0.2, 1)
@@ -472,14 +482,6 @@ class ResultScreen(Screen):
         email_btn.bind(on_press=self.on_email)
         button_layout.add_widget(email_btn)
         
-        # Quit button
-        quit_btn = Button(
-            text='QUIT',
-            font_size=dp(18),
-            background_color=(0.8, 0.2, 0.2, 1)
-        )
-        quit_btn.bind(on_press=self.on_quit)
-        button_layout.add_widget(quit_btn)
         
         layout.add_widget(button_layout)
         
@@ -586,15 +588,6 @@ class StartScreen(Screen):
         )
         start_btn.bind(on_press=self.on_start_new)
         button_layout.add_widget(start_btn)
-        
-        # Refresh button
-        refresh_btn = Button(
-            text='🔄 REFRESH',
-            font_size=dp(18),
-            background_color=(0.2, 0.5, 0.8, 1)
-        )
-        refresh_btn.bind(on_press=self.on_refresh)
-        button_layout.add_widget(refresh_btn)
         
         layout.add_widget(button_layout)
         
