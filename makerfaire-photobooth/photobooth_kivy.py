@@ -517,6 +517,9 @@ class ResultScreen(Screen):
     
     def on_new_photo(self, instance):
         """Start a new photo session."""
+        # Reset generation and email flags
+        self.photobooth_app.generation_in_progress = False
+        self.photobooth_app.email_sending_in_progress = False
         # Clear text input and transcription
         if hasattr(self.photobooth_app.text_input_screen, 'text_input'):
             self.photobooth_app.text_input_screen.text_input.text = ''
@@ -734,6 +737,9 @@ class StartScreen(Screen):
     
     def on_start_new(self, instance):
         """Start a new photo session."""
+        # Reset generation and email flags
+        self.photobooth_app.generation_in_progress = False
+        self.photobooth_app.email_sending_in_progress = False
         # Clear text input and transcription
         if hasattr(self.photobooth_app.text_input_screen, 'text_input'):
             self.photobooth_app.text_input_screen.text_input.text = ''
@@ -842,6 +848,10 @@ class LoadingScreen(Screen):
         if hasattr(self, 'animation_event'):
             self.animation_event.cancel()
         
+        # Reset generation and email flags
+        self.photobooth_app.generation_in_progress = False
+        self.photobooth_app.email_sending_in_progress = False
+        
         # Clear text input and go back to start screen
         if hasattr(self.photobooth_app.text_input_screen, 'text_input'):
             self.photobooth_app.text_input_screen.text_input.text = ''
@@ -889,6 +899,12 @@ class PhotoboothKivyApp(App):
         self.current_frame = None
         self.current_saved_path = None
         
+        # Flag to prevent duplicate image generation
+        self.generation_in_progress = False
+        
+        # Flag to prevent duplicate email sending
+        self.email_sending_in_progress = False
+        
         # Screen manager
         self.screen_manager = ScreenManager()
         
@@ -928,6 +944,9 @@ class PhotoboothKivyApp(App):
     
     def show_input_methods(self, frame):
         """Show input method selection screen."""
+        # Reset generation and email flags for new photo
+        self.generation_in_progress = False
+        self.email_sending_in_progress = False
         self.current_frame = frame
         self.input_method_screen.show_captured_image(frame)
         self.screen_manager.current = 'input_method'
@@ -1056,6 +1075,14 @@ class PhotoboothKivyApp(App):
         if not transcript or self.current_frame is None:
             return
         
+        # Prevent duplicate generation
+        if self.generation_in_progress:
+            print("Generation already in progress, ignoring duplicate request")
+            return
+        
+        # Set flag to prevent duplicate calls
+        self.generation_in_progress = True
+        
         # Show transcription in text input screen
         if hasattr(self.text_input_screen, 'transcription_label'):
             self.text_input_screen.transcription_label.text = f"🎤 Heard: {transcript}"
@@ -1069,6 +1096,8 @@ class PhotoboothKivyApp(App):
                 Clock.schedule_once(lambda dt: self.show_result(generated), 0)
             except Exception as exc:
                 Clock.schedule_once(lambda dt: self.show_error(f"Generation failed: {exc}"), 0)
+                # Reset flag on error
+                self.generation_in_progress = False
         
         threading.Thread(target=generate_thread, daemon=True).start()
     
@@ -1143,6 +1172,9 @@ class PhotoboothKivyApp(App):
     
     def show_result(self, image):
         """Show the generated result."""
+        # Reset generation flag
+        self.generation_in_progress = False
+        
         # Save the image with timestamp
         saved_path = self.save_generated_image(image)
         self.current_saved_path = saved_path
@@ -1263,6 +1295,14 @@ class PhotoboothKivyApp(App):
             self.show_error("SendGrid API key not configured. Please set SENDGRID_API_KEY environment variable.")
             return
         
+        # Prevent duplicate email sending
+        if self.email_sending_in_progress:
+            print("Email sending already in progress, ignoring duplicate request")
+            return
+        
+        # Set flag to prevent duplicate calls
+        self.email_sending_in_progress = True
+        
         def email_thread():
             try:
                 # Load the image
@@ -1273,13 +1313,14 @@ class PhotoboothKivyApp(App):
                 image = cv2.imread(self.current_saved_path)
                 if image is None:
                     Clock.schedule_once(lambda dt: self.show_error("Could not load image for email"), 0)
+                    self.email_sending_in_progress = False
                     return
                 
                 # Encode image as base64 for attachment
                 encoded_image = base64.b64encode(image_data).decode()
                 
                 # Create email message
-                from_email = "help@maven.ly" #os.getenv("SENDGRID_FROM_EMAIL", "photobooth@makerfaire.com")
+                from_email = "noreply@interminuslabs.com" #os.getenv("SENDGRID_FROM_EMAIL", "photobooth@makerfaire.com")
                 subject = "Your MakerFaire Photobooth Photo"
                 
                 # Get the image filename
@@ -1329,21 +1370,31 @@ class PhotoboothKivyApp(App):
                 
                 # Check if email was sent successfully (status code 202 is success)
                 if response.status_code == 202:
-                    # Clear email input
-                    if hasattr(self.email_input_screen, 'email_input'):
-                        self.email_input_screen.email_input.text = ''
                     # Navigate back to result screen and show success message
+                    # All UI updates must happen on Kivy thread
                     def show_success(dt):
+                        # Reset flag
+                        self.email_sending_in_progress = False
+                        # Clear email input on Kivy thread
+                        if hasattr(self.email_input_screen, 'email_input'):
+                            self.email_input_screen.email_input.text = ''
+                        # Navigate back to result screen
                         self.screen_manager.current = 'result'
                         self.show_status("Email sent successfully!")
                     Clock.schedule_once(show_success, 0)
                 else:
                     error_msg = f"Email failed with status code: {response.status_code}"
-                    Clock.schedule_once(lambda dt: self.show_error(error_msg), 0)
+                    def handle_error(dt):
+                        self.email_sending_in_progress = False
+                        self.show_error(error_msg)
+                    Clock.schedule_once(handle_error, 0)
                 
             except Exception as e:
                 error_msg = f"Email error: {str(e)}"
-                Clock.schedule_once(lambda dt: self.show_error(error_msg), 0)
+                def handle_error(dt):
+                    self.email_sending_in_progress = False
+                    self.show_error(error_msg)
+                Clock.schedule_once(handle_error, 0)
         
         threading.Thread(target=email_thread, daemon=True).start()
     
@@ -1429,7 +1480,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speech-timeout",
         type=float,
-        default=5.0,
+        default=1.0,
         help="Seconds to wait for speech to start (default: 5.0)",
     )
     parser.add_argument(
