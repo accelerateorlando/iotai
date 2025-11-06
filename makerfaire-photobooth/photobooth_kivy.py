@@ -248,6 +248,7 @@ class TextInputScreen(Screen):
     def __init__(self, photobooth_app, **kwargs):
         super().__init__(**kwargs)
         self.photobooth_app = photobooth_app
+        self.speech_mode = False  # Default to text mode
         
         layout = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
         
@@ -264,11 +265,13 @@ class TextInputScreen(Screen):
         # Transcription display
         self.transcription_label = Label(
             text='',
-            size_hint_y=0.15,
-            font_size=dp(16),
+            size_hint_y=0.2,
+            font_size=dp(20),
             color=(0.2, 0.6, 0.2, 1),
             text_size=(None, None),
-            halign='center'
+            halign='center',
+            valign='middle',
+            bold=True
         )
         layout.add_widget(self.transcription_label)
         
@@ -308,10 +311,27 @@ class TextInputScreen(Screen):
         
         self.add_widget(layout)
     
+    def set_speech_mode(self, enabled):
+        """Show or hide text input based on mode."""
+        self.speech_mode = enabled
+        if enabled:
+            # Speech mode: hide text input, make transcription label larger
+            self.text_input.opacity = 0
+            self.text_input.size_hint_y = 0
+            self.transcription_label.size_hint_y = 0.5
+            self.transcription_label.font_size = dp(28)
+        else:
+            # Text mode: show text input, make transcription label smaller
+            self.text_input.opacity = 1
+            self.text_input.size_hint_y = 0.3
+            self.transcription_label.size_hint_y = 0.2
+            self.transcription_label.font_size = dp(20)
+    
     def on_enter(self):
-        """Called when the screen is entered - focus the text input."""
-        # Schedule focus after a short delay to ensure screen is fully rendered
-        Clock.schedule_once(lambda dt: setattr(self.text_input, 'focus', True), 0.1)
+        """Called when the screen is entered - focus the text input if in text mode."""
+        if not self.speech_mode:
+            # Schedule focus after a short delay to ensure screen is fully rendered
+            Clock.schedule_once(lambda dt: setattr(self.text_input, 'focus', True), 0.1)
     
     def on_submit(self, instance):
         """Submit text input."""
@@ -323,6 +343,8 @@ class TextInputScreen(Screen):
     
     def on_back(self, instance):
         """Go back to input method screen."""
+        # Reset to text mode when going back
+        self.set_speech_mode(False)
         self.photobooth_app.screen_manager.current = 'input_method'
 
 
@@ -973,8 +995,17 @@ class PhotoboothKivyApp(App):
                     if not stop_listening.is_set():
                         q.put(bytes(indata))
                 
-                # Update UI to show listening
-                Clock.schedule_once(lambda dt: self.show_status("Listening..."), 0)
+                # Update UI to show listening and switch to text input screen
+                def start_listening(dt):
+                    self.show_status("Listening...")
+                    # Switch to text input screen to show transcription
+                    self.screen_manager.current = 'text_input'
+                    # Set speech mode (hides text input box)
+                    self.text_input_screen.set_speech_mode(True)
+                    # Clear any previous transcription
+                    if hasattr(self.text_input_screen, 'transcription_label'):
+                        self.text_input_screen.transcription_label.text = "🎤 Listening... Speak now!"
+                Clock.schedule_once(start_listening, 0)
                 
                 # Start audio stream
                 stream_kwargs = {
@@ -1006,6 +1037,9 @@ class PhotoboothKivyApp(App):
                                 # Get audio data - block until available (like example)
                                 data = q.get()
                                 
+                                final_result_available = False
+                                partial_text = None
+                                
                                 if rec.AcceptWaveform(data):
                                     # Final result available
                                     res = json.loads(rec.Result())
@@ -1014,12 +1048,24 @@ class PhotoboothKivyApp(App):
                                         transcript = text
                                         last_result_time = time.time()
                                         print(f">> {transcript}", flush=True)
-                                        
-                                # Check partial results (like example, but commented out)
-                                # Uncomment if you want to see partial results:
-                                # partial = json.loads(rec.PartialResult())
-                                # if partial.get("partial"):
-                                #     print(f"Partial: {partial['partial']}", flush=True)
+                                        final_result_available = True
+                                else:
+                                    # Check partial results for real-time display
+                                    partial = json.loads(rec.PartialResult())
+                                    partial_text = partial.get("partial")
+                                    if partial_text:
+                                        last_result_time = time.time()
+                                
+                                # Update UI - prioritize final results over partial
+                                def update_ui(dt):
+                                    if hasattr(self.text_input_screen, 'transcription_label'):
+                                        if final_result_available and transcript:
+                                            # Show final result
+                                            self.text_input_screen.transcription_label.text = f"🎤 Heard: {transcript}"
+                                        elif partial_text:
+                                            # Show partial result with visual indicator
+                                            self.text_input_screen.transcription_label.text = f"🎤 {partial_text}..."
+                                Clock.schedule_once(update_ui, 0)
                                     
                             except queue.Empty:
                                 # Shouldn't happen with blocking get(), but handle it anyway
@@ -1037,10 +1083,16 @@ class PhotoboothKivyApp(App):
                         if final_text:
                             # Use final result if it's more complete
                             transcript = final_text
+                            # Update UI with final result
+                            def update_final_ui(dt):
+                                if hasattr(self.text_input_screen, 'transcription_label'):
+                                    self.text_input_screen.transcription_label.text = f"🎤 Heard: {transcript}"
+                            Clock.schedule_once(update_final_ui, 0)
                         
                         # Process the transcript
                         if transcript:
-                            Clock.schedule_once(lambda dt: self.process_input(transcript), 0)
+                            # Small delay to show final transcription before processing
+                            Clock.schedule_once(lambda dt: self.process_input(transcript), 0.5)
                         else:
                             Clock.schedule_once(lambda dt: self.show_error("No speech detected"), 0)
                             
@@ -1061,6 +1113,8 @@ class PhotoboothKivyApp(App):
     
     def show_text_input(self):
         """Show text input screen."""
+        # Set text mode (shows text input box)
+        self.text_input_screen.set_speech_mode(False)
         self.screen_manager.current = 'text_input'
     
     def process_input(self, transcript):
