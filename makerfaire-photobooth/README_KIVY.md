@@ -19,27 +19,23 @@ A touch-friendly photobooth application built with Kivy that captures photos, ac
 pip install -r requirements.txt
 ```
 
-2. Set up your Google API key:
+2. Set up your FAL AI API key:
 ```bash
-export GOOGLE_API_KEY="your-api-key-here"
+export FAL_KEY="your-api-key-here" SENDGRID_API_KEY="your-api-key-here"
 ```
 
 Or create a `.env` file in the project directory:
 ```
-GOOGLE_API_KEY=your-api-key-here
+FAL_KEY=your-api-key-here
+SENDGRID_API_KEY=your-api-key-here
 ```
 
 ## Usage
 
-### Run the Kivy version (recommended for touch screens):
 ```bash
 python run_kivy.py
 ```
 
-### Run the original OpenCV version:
-```bash
-python photobooth.py
-```
 
 ## Kivy UI Workflow
 
@@ -51,7 +47,6 @@ python photobooth.py
 ## Command Line Options
 
 - `--camera N`: Use camera index N (default: 0)
-- `--model MODEL`: Specify Gemini model (default: gemini-2.5-flash-image-preview)
 - `--speech-timeout SECONDS`: Speech detection timeout (default: 5.0)
 - `--phrase-time-limit SECONDS`: Maximum speech duration (default: 8.0)
 
@@ -69,20 +64,14 @@ The Kivy interface is optimized for touch screens with:
 - Python 3.7+
 - Camera (USB webcam or built-in)
 - Microphone (for speech input)
-- Google API key for Gemini
+- FAL API key for Gemini
+- Sendgrid API key if you want the app to send emails
 - Kivy 2.2.0+
 - OpenCV
 - SpeechRecognition
-- Google GenAI
 
 ## Troubleshooting
 
 - **Camera not working**: Try different camera indices with `--camera 1`, `--camera 2`, etc.
 - **Microphone issues**: Check microphone permissions and availability
-- **API errors**: Verify your Google API key is correct and has Gemini access
 - **Touch not working**: Ensure you're running the Kivy version (`run_kivy.py`)
-
-## Original vs Kivy Version
-
-- **Original (`photobooth.py`)**: Keyboard-controlled, OpenCV windows, good for development
-- **Kivy (`photobooth_kivy.py`)**: Touch-controlled, modern UI, perfect for public kiosks
